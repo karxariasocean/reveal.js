@@ -2,7 +2,7 @@
  * The default reveal.js config object.
  */
 export default {
-        
+          
 	// The "normal" size of the presentation, aspect ratio will be preserved
 	// when the presentation is scaled to fit different resolutions
 	width: 960,
