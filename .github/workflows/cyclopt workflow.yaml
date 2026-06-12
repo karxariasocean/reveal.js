@@ -8,6 +8,9 @@ on:
         required: true
         default: 'test'
         type: choice
+        # options:
+        #   - main
+        #   - test
         options:
           - master
           - develop
@@ -21,6 +24,16 @@ jobs:
     #       || fromJson('["self-hosted", "Windows", "self-hosted-liferay"]') }}
 
     steps:
+      - name: Check connectivity to Cyclopt server
+        shell: pwsh
+        run: |
+          $result = Test-NetConnection -ComputerName "server.cyclopt.com" -Port 443
+          if (-not $result.TcpTestSucceeded) {
+            Write-Warning "Cannot reach server.cyclopt.com:443 from this runner. Check firewall/IP allowlist."
+          } else {
+            echo "Connectivity OK: server.cyclopt.com:443 is reachable."
+          }
+
       - name: Get latest commit SHA
         id: get_sha
         shell: pwsh
@@ -63,9 +76,7 @@ jobs:
                 $response = Invoke-RestMethod `
                   -Uri $url `
                   -Headers @{ "x-access-cyclopt-token" = "${{ secrets.CYCLOPT_TOKEN }}" } `
-                  -TimeoutSec 30 `
-                  -MaximumRetryCount 3 `
-                  -RetryIntervalSec 5
+                  -TimeoutSec 30
               } catch {
                 $errorAttempts++
                 echo "Connection error (attempt $errorAttempts/$maxErrorAttempts): $_"
