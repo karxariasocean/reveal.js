@@ -9,8 +9,8 @@ on:
         default: 'test'
         type: choice
         options:
-          - test
-          - main
+          - master
+          - develop
 
 jobs:
   cyclopt-analysis:
