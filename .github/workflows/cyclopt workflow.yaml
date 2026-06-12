@@ -24,16 +24,6 @@ jobs:
     #       || fromJson('["self-hosted", "Windows", "self-hosted-liferay"]') }}
 
     steps:
-      - name: Check connectivity to Cyclopt server
-        shell: pwsh
-        run: |
-          $result = Test-NetConnection -ComputerName "server.cyclopt.com" -Port 443
-          if (-not $result.TcpTestSucceeded) {
-            Write-Warning "Cannot reach server.cyclopt.com:443 from this runner. Check firewall/IP allowlist."
-          } else {
-            echo "Connectivity OK: server.cyclopt.com:443 is reachable."
-          }
-
       - name: Get latest commit SHA
         id: get_sha
         shell: pwsh
