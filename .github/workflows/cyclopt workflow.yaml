@@ -1,0 +1,100 @@
+name: Cyclopt Quality Gate - Manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to analyze'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - test
+          - main
+
+jobs:
+  cyclopt-analysis:
+    runs-on: windows-latest
+    # runs-on: >-
+    #   ${{ inputs.branch == 'main'
+    #       && fromJson('["self-hosted", "Windows", "self-hosted-dmzsrv2"]')
+    #       || fromJson('["self-hosted", "Windows", "self-hosted-liferay"]') }}
+
+    steps:
+      - name: Get latest commit SHA
+        id: get_sha
+        shell: pwsh
+        # shell: cmd
+        run: |
+          $response = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/commits/${{ inputs.branch }}" `
+            -Headers @{
+              Authorization = "Bearer ${{ secrets.WORKFLOW_GITHUB_TOKEN }}"
+              Accept = "application/vnd.github+json"
+            }
+
+          "sha=$($response.sha)" >> $env:GITHUB_OUTPUT
+        # for /f "delims=" %%i in ('curl -s -H "Authorization: Bearer ${{ secrets.WORKFLOW_GITHUB_TOKEN }}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/commits/${{ inputs.branch }}" ^| jq -r ".sha"') do set SHA=%%i
+        # echo sha=%SHA%>> %GITHUB_OUTPUT%
+
+      - name: Get Cyclopt Quality Gate Status
+        id: cyclopt
+        shell: pwsh
+        env:
+          CYCLOPS_TOKEN: ${{ secrets.CYCLOPT_TOKEN }}
+        # shell: cmd
+        run: |
+            $url = "https://server.cyclopt.com/cyclopt/openapi/quality-gates/commit/${{ steps.get_sha.outputs.sha }}"
+
+            $response = Invoke-RestMethod `
+              -Uri $url `
+              -Headers @{
+                "x-access-cyclopt-token" = "${{ secrets.CYCLOPT_TOKEN }}"
+              }
+
+            $status =
+              if ($response.hasError) { "error" }
+              elseif ($response.inProgress) { "inprogress" }
+              elseif ($response.success) { "success" }
+              else { "failed" }
+
+            $message = if ($response.errorMessage) { $response.errorMessage } else { "" }
+
+            "status=$status" >> $env:GITHUB_OUTPUT
+            "message=$message" >> $env:GITHUB_OUTPUT
+            echo "Status: $status"
+            echo "Message: $message"
+            echo "Message: $response"
+        # for /f "delims=" %%i in ('curl -s -H "x-access-cyclopt-token: ${{ secrets.CYCLOPT_TOKEN }}" "https://server.cyclopt.com/cyclopt/openapi/quality-gates/commit/%sha%" ^| jq -r "if .hasError then \"error\" elif .inProgress then \"inprogress\" elif .success then \"success\" else \"failed\" end"') do set STATUS=%%i
+        # for /f "delims=" %%i in ('curl -s -H "x-access-cyclopt-token: ${{ secrets.CYCLOPT_TOKEN }}" "https://server.cyclopt.com/cyclopt/openapi/quality-gates/commit/%sha%" ^| jq -r ".errorMessage // \"\""') do set MSG=%%i
+        # env:
+        #   sha: ${{ steps.get_sha.outputs.sha }}
+
+      - name: Notify Teams
+        if: always()
+        env:
+          TEAMS_WEBHOOK: ${{ secrets.TEAMS_CHAT_WEBHOOK }}
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+
+          set STATUS=${{ steps.cyclopt.outputs.status }}
+          set MSG=${{ steps.cyclopt.outputs.message }}
+          set RUN_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          set REPO=${{ github.repository }}
+          set BRANCH=${{ inputs.branch }}
+          set SHA=${{ steps.get_sha.outputs.sha }}
+
+          if "!STATUS!"=="success"    set TITLE=✅ Cyclopt Quality Gate Passed
+          if "!STATUS!"=="failed"     set TITLE=❌ Cyclopt Quality Gate Failed
+          if "!STATUS!"=="inprogress" set TITLE=⏱️ Cyclopt Analysis Still In Progress
+          if "!STATUS!"=="error"      set TITLE=⚠️ Cyclopt Analysis Error
+          if "!STATUS!"==""           set TITLE=❓ Cyclopt Analysis - Unknown Result
+
+          set CARD={"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.2","body":[{"type":"TextBlock","text":"!TITLE!","weight":"Bolder","size":"Medium","wrap":true},{"type":"FactSet","facts":[{"title":"Repository","value":"!REPO!"},{"title":"Branch","value":"!BRANCH!"},{"title":"Commit","value":"!SHA!"},{"title":"Message","value":"!MSG!"}]},{"type":"ActionSet","actions":[{"type":"Action.OpenUrl","title":"View GitHub Actions Run","url":"!RUN_URL!"}]}]}}]}
+
+          echo !MSG!
+          echo !CARD! > payload.json
+          curl -H "Content-Type: application/json" -d @payload.json "%TEAMS_WEBHOOK%"
+        # curl -H "Content-Type: application/json" -d @payload.json "${{ secrets.TEAMS_CHAT_WEBHOOK }}"
+        # curl -s -H "Content-Type: application/json" -d @payload.json "${{ secrets.TEAMS_CHAT_WEBHOOK }}"
