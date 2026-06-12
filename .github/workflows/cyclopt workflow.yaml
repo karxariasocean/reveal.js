@@ -46,39 +46,100 @@ jobs:
         run: |
             $url = "https://server.cyclopt.com/cyclopt/openapi/quality-gates/commit/${{ steps.get_sha.outputs.sha }}"
 
-            $response = Invoke-RestMethod `
-              -Uri $url `
-              -Headers @{
-                "x-access-cyclopt-token" = "${{ secrets.CYCLOPT_TOKEN }}"
+            $errorAttempts      = 0
+            $maxErrorAttempts   = 6
+            $inProgressSleep    = 0
+            $maxInProgressSleep = 600  # 10 minutes in seconds
+
+            $response   = $null
+            $status     = "unknown"
+            $message    = ""
+            $inProgress = $false
+            $hasError   = $false
+            $success    = $false
+
+            while ($true) {
+              try {
+                $response = Invoke-RestMethod `
+                  -Uri $url `
+                  -Headers @{ "x-access-cyclopt-token" = "${{ secrets.CYCLOPT_TOKEN }}" } `
+                  -TimeoutSec 30 `
+                  -MaximumRetryCount 3 `
+                  -RetryIntervalSec 5
+              } catch {
+                $errorAttempts++
+                echo "Connection error (attempt $errorAttempts/$maxErrorAttempts): $_"
+                if ($errorAttempts -lt $maxErrorAttempts) {
+                  echo "Retrying in 10 seconds..."
+                  Start-Sleep -Seconds 10
+                  continue
+                }
+                echo "Max error retry attempts reached. Failing the workflow."
+                $status  = "error"
+                $message = "Connection failed after $maxErrorAttempts attempts"
+                break
               }
 
-            $inProgress = [bool]$response.inProgress
-            $hasError   = [bool]$response.hasError
-            $success    = [bool]$response.success
+              echo "DEBUG: API Response: $($response | ConvertTo-Json -Compress -Depth 10)"
 
-            $status =
-              if ($hasError)    { "error" }
-              elseif ($inProgress) { "inprogress" }
-              elseif ($success) { "success" }
-              else { "failed" }
+              $inProgress = [bool]$response.inProgress
+              $hasError   = [bool]$response.hasError
+              $success    = [bool]$response.success
+              $message    = if ($response.errorMessage) { $response.errorMessage } else { "" }
 
-            $message = if ($response.errorMessage) { $response.errorMessage } else { "" }
+              if ($hasError) {
+                $errorAttempts++
+                echo "Error occurred during analysis: $message (attempt $errorAttempts/$maxErrorAttempts)"
+                if ($errorAttempts -lt $maxErrorAttempts) {
+                  echo "Retrying after error in 10 seconds..."
+                  Start-Sleep -Seconds 10
+                  continue
+                }
+                echo "Max error retry attempts reached. Failing the workflow."
+                $status = "error"
+                break
+              }
 
-            $passed = if ($null -ne $response.passed) {
+              if ($inProgress) {
+                echo "Analysis is still in progress."
+                if ($inProgressSleep -ge $maxInProgressSleep) {
+                  echo "Analysis has been in progress for more than 10 minutes. Timing out."
+                  $status  = "inprogress"
+                  $message = "Analysis timed out after 10 minutes"
+                  break
+                }
+                echo "Retrying in 5 seconds..."
+                $inProgressSleep += 5
+                Start-Sleep -Seconds 5
+                continue
+              }
+
+              if ($success) {
+                echo "Analysis succeeded."
+                $status = "success"
+                break
+              } else {
+                echo "Analysis failed."
+                $status = "failed"
+                break
+              }
+            }
+
+            $passed = if ($null -ne $response -and $null -ne $response.passed) {
               $response.passed | ConvertTo-Json -Compress
             } else { "[]" }
 
-            $failed = if ($null -ne $response.failed -and $response.failed.Count -gt 0) {
+            $failed = if ($null -ne $response -and $null -ne $response.failed -and $response.failed.Count -gt 0) {
               $response.failed | ConvertTo-Json -Compress -Depth 10
             } else { "[]" }
 
-            "status=$status"     >> $env:GITHUB_OUTPUT
-            "message=$message"   >> $env:GITHUB_OUTPUT
-            "passed=$passed"     >> $env:GITHUB_OUTPUT
-            "failed=$failed"     >> $env:GITHUB_OUTPUT
+            "status=$status"         >> $env:GITHUB_OUTPUT
+            "message=$message"       >> $env:GITHUB_OUTPUT
+            "passed=$passed"         >> $env:GITHUB_OUTPUT
+            "failed=$failed"         >> $env:GITHUB_OUTPUT
             "inProgress=$inProgress" >> $env:GITHUB_OUTPUT
-            "hasError=$hasError" >> $env:GITHUB_OUTPUT
-            "success=$success"   >> $env:GITHUB_OUTPUT
+            "hasError=$hasError"     >> $env:GITHUB_OUTPUT
+            "success=$success"       >> $env:GITHUB_OUTPUT
 
             echo "Status:     $status"
             echo "Message:    $message"
