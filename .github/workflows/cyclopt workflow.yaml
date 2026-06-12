@@ -52,19 +52,41 @@ jobs:
                 "x-access-cyclopt-token" = "${{ secrets.CYCLOPT_TOKEN }}"
               }
 
+            $inProgress = [bool]$response.inProgress
+            $hasError   = [bool]$response.hasError
+            $success    = [bool]$response.success
+
             $status =
-              if ($response.hasError) { "error" }
-              elseif ($response.inProgress) { "inprogress" }
-              elseif ($response.success) { "success" }
+              if ($hasError)    { "error" }
+              elseif ($inProgress) { "inprogress" }
+              elseif ($success) { "success" }
               else { "failed" }
 
             $message = if ($response.errorMessage) { $response.errorMessage } else { "" }
 
-            "status=$status" >> $env:GITHUB_OUTPUT
-            "message=$message" >> $env:GITHUB_OUTPUT
-            echo "Status: $status"
-            echo "Message: $message"
-            echo "Message: $response"
+            $passed = if ($null -ne $response.passed) {
+              $response.passed | ConvertTo-Json -Compress
+            } else { "[]" }
+
+            $failed = if ($null -ne $response.failed -and $response.failed.Count -gt 0) {
+              $response.failed | ConvertTo-Json -Compress -Depth 10
+            } else { "[]" }
+
+            "status=$status"     >> $env:GITHUB_OUTPUT
+            "message=$message"   >> $env:GITHUB_OUTPUT
+            "passed=$passed"     >> $env:GITHUB_OUTPUT
+            "failed=$failed"     >> $env:GITHUB_OUTPUT
+            "inProgress=$inProgress" >> $env:GITHUB_OUTPUT
+            "hasError=$hasError" >> $env:GITHUB_OUTPUT
+            "success=$success"   >> $env:GITHUB_OUTPUT
+
+            echo "Status:     $status"
+            echo "Message:    $message"
+            echo "inProgress: $inProgress"
+            echo "hasError:   $hasError"
+            echo "success:    $success"
+            echo "Passed:     $passed"
+            echo "Failed:     $failed"
         # for /f "delims=" %%i in ('curl -s -H "x-access-cyclopt-token: ${{ secrets.CYCLOPT_TOKEN }}" "https://server.cyclopt.com/cyclopt/openapi/quality-gates/commit/%sha%" ^| jq -r "if .hasError then \"error\" elif .inProgress then \"inprogress\" elif .success then \"success\" else \"failed\" end"') do set STATUS=%%i
         # for /f "delims=" %%i in ('curl -s -H "x-access-cyclopt-token: ${{ secrets.CYCLOPT_TOKEN }}" "https://server.cyclopt.com/cyclopt/openapi/quality-gates/commit/%sha%" ^| jq -r ".errorMessage // \"\""') do set MSG=%%i
         # env:
@@ -74,27 +96,78 @@ jobs:
         if: always()
         env:
           TEAMS_WEBHOOK: ${{ secrets.TEAMS_CHAT_WEBHOOK }}
-        shell: cmd
+        shell: pwsh
         run: |
-          setlocal EnableDelayedExpansion
+          $status  = "${{ steps.cyclopt.outputs.status }}"
+          $message = "${{ steps.cyclopt.outputs.message }}"
+          $passed  = '${{ steps.cyclopt.outputs.passed }}'
+          $failed  = '${{ steps.cyclopt.outputs.failed }}'
+          $runUrl  = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $repo    = "${{ github.repository }}"
+          $branch  = "${{ inputs.branch }}"
+          $sha     = "${{ steps.get_sha.outputs.sha }}"
 
-          set STATUS=${{ steps.cyclopt.outputs.status }}
-          set MSG=${{ steps.cyclopt.outputs.message }}
-          set RUN_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          set REPO=${{ github.repository }}
-          set BRANCH=${{ inputs.branch }}
-          set SHA=${{ steps.get_sha.outputs.sha }}
+          $title = switch ($status) {
+            "success"    { "✅ Cyclopt Quality Gate Passed" }
+            "failed"     { "❌ Cyclopt Quality Gate Failed" }
+            "inprogress" { "⏱️ Cyclopt Analysis Still In Progress" }
+            "error"      { "⚠️ Cyclopt Analysis Error" }
+            default      { "❓ Cyclopt Analysis - Unknown Result" }
+          }
 
-          if "!STATUS!"=="success"    set TITLE=✅ Cyclopt Quality Gate Passed
-          if "!STATUS!"=="failed"     set TITLE=❌ Cyclopt Quality Gate Failed
-          if "!STATUS!"=="inprogress" set TITLE=⏱️ Cyclopt Analysis Still In Progress
-          if "!STATUS!"=="error"      set TITLE=⚠️ Cyclopt Analysis Error
-          if "!STATUS!"==""           set TITLE=❓ Cyclopt Analysis - Unknown Result
+          $body = [System.Collections.Generic.List[object]]::new()
 
-          set CARD={"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.2","body":[{"type":"TextBlock","text":"!TITLE!","weight":"Bolder","size":"Medium","wrap":true},{"type":"FactSet","facts":[{"title":"Repository","value":"!REPO!"},{"title":"Branch","value":"!BRANCH!"},{"title":"Commit","value":"!SHA!"},{"title":"Message","value":"!MSG!"}]},{"type":"ActionSet","actions":[{"type":"Action.OpenUrl","title":"View GitHub Actions Run","url":"!RUN_URL!"}]}]}}]}
+          $body.Add(@{ type = "TextBlock"; text = $title; weight = "Bolder"; size = "Medium"; wrap = $true })
+          $body.Add(@{
+            type  = "FactSet"
+            facts = @(
+              @{ title = "Repository"; value = $repo },
+              @{ title = "Branch";     value = $branch },
+              @{ title = "Commit";     value = $sha }
+            )
+          })
 
-          echo !MSG!
-          echo !CARD! > payload.json
-          curl -H "Content-Type: application/json" -d @payload.json "%TEAMS_WEBHOOK%"
-        # curl -H "Content-Type: application/json" -d @payload.json "${{ secrets.TEAMS_CHAT_WEBHOOK }}"
-        # curl -s -H "Content-Type: application/json" -d @payload.json "${{ secrets.TEAMS_CHAT_WEBHOOK }}"
+          if ($message) {
+            $body.Add(@{ type = "TextBlock"; text = "⚠️ $message"; color = "Warning"; wrap = $true })
+          }
+
+          $passedList = $passed | ConvertFrom-Json
+          if ($passedList -and $passedList.Count -gt 0) {
+            $body.Add(@{ type = "TextBlock"; text = "**✅ Passed Quality Gates**"; weight = "Bolder"; wrap = $true })
+            $body.Add(@{ type = "TextBlock"; text = ($passedList -join ", "); color = "Good"; wrap = $true })
+          }
+
+          $failedList = $failed | ConvertFrom-Json
+          if ($failedList -and $failedList.Count -gt 0) {
+            $body.Add(@{ type = "TextBlock"; text = "**❌ Failed Quality Gates**"; weight = "Bolder"; wrap = $true })
+            foreach ($entry in $failedList) {
+              $body.Add(@{ type = "TextBlock"; text = "Language: $($entry.language) | Root: $($entry.root)"; isSubtle = $true; wrap = $true })
+              foreach ($qg in $entry.qualityGates) {
+                $body.Add(@{ type = "TextBlock"; text = "• $($qg.name)"; color = "Attention"; wrap = $true })
+                foreach ($cond in $qg.failedConditions) {
+                  $body.Add(@{ type = "TextBlock"; text = "  ↳ $cond"; isSubtle = $true; wrap = $true })
+                }
+              }
+            }
+          }
+
+          $body.Add(@{
+            type    = "ActionSet"
+            actions = @(@{ type = "Action.OpenUrl"; title = "View GitHub Actions Run"; url = $runUrl })
+          })
+
+          $card = @{
+            type        = "message"
+            attachments = @(@{
+              contentType = "application/vnd.microsoft.card.adaptive"
+              content     = [ordered]@{
+                '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+                type      = "AdaptiveCard"
+                version   = "1.2"
+                body      = $body.ToArray()
+              }
+            })
+          }
+
+          $card | ConvertTo-Json -Depth 20 -Compress | Out-File -FilePath payload.json -Encoding utf8
+          curl -H "Content-Type: application/json" -d "@payload.json" $env:TEAMS_WEBHOOK
