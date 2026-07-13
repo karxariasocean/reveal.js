@@ -11,6 +11,7 @@ import Deck, { VERSION } from './reveal.js'
  * });
  */
 let Reveal = Deck;
+let name = "nikos";
 
 
 /**
